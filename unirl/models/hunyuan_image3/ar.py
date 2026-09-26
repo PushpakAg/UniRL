@@ -42,12 +42,11 @@ class HunyuanImage3ARState:
 
     input_ids: torch.Tensor  # [B, T] long; grows by one column per step
     model_kwargs: Dict[str, Any]  # HF-style kwargs threaded across steps
-    real_pos: torch.Tensor  # [B] long; per-row prompt length = next free slot — see README ## Gotchas
     step_idx: int = 0
 
 
 class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions, HunyuanImage3ARState]):
-    """Per-token transition kernel — owns the model forward."""
+    """Per-token transition kernel — owns the model forward; batched-cache rules in README ``## Gotchas``."""
 
     def __init__(
         self,
@@ -100,14 +99,6 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
         input_ids: torch.Tensor = fused.input_ids
         batch_size = int(input_ids.shape[0])
 
-        if conditions.tokenizer_output is None or fused.prompt_lengths is None:
-            raise ValueError(
-                "HunyuanImage3ARStep.init_state: requires conditions.tokenizer_output and "
-                "fused.prompt_lengths (its per-row real_pos). Upstream reads real_pos as the decode "
-                "position_ids; without it every decode step silently re-feeds the shifted prompt. "
-                "Build both via HunyuanImage3TextEmbedStage.embed_for_ar(...)."
-            )
-
         prompt_len = int(input_ids.shape[1])
         cache_cls = sys.modules[type(transformer).__module__].HunyuanStaticCache
         past_kv_initial = cache_cls(
@@ -153,7 +144,7 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
         transformer.num_image_tokens = 0
         transformer.num_special_tokens = None
 
-        return HunyuanImage3ARState(input_ids=input_ids, model_kwargs=model_kwargs, real_pos=fused.prompt_lengths)
+        return HunyuanImage3ARState(input_ids=input_ids, model_kwargs=model_kwargs)
 
     def step(
         self,
@@ -166,6 +157,7 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
         device = state.input_ids.device
         batch_size = int(state.input_ids.shape[0])
         model_kwargs = state.model_kwargs
+        real_pos = conditions.fused.prompt_lengths
 
         cond_kwargs: Dict[str, Any] = {}
         if state.step_idx == 0:
@@ -181,12 +173,12 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
         past_key_values = model_kwargs["past_key_values"]
         attention_mask = model_kwargs.get("attention_mask")
         if not past_key_values.dynamic:
-            key_len = int(past_key_values.max_cache_len)
+            key_len = past_key_values.max_cache_len
             if state.step_idx == 0:
                 attention_mask = F.pad(attention_mask, (0, key_len - attention_mask.shape[-1]), value=False)
             else:
                 keys = torch.arange(key_len, device=device)
-                attention_mask = (keys < state.real_pos[:, None] + state.step_idx)[:, None, None, :]
+                attention_mask = (keys < real_pos[:, None] + state.step_idx)[:, None, None, :]
         model_inputs = transformer.prepare_inputs_for_generation(
             state.input_ids,
             past_key_values=past_key_values,
@@ -209,7 +201,7 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
 
         logits_device = logits.device
         if state.step_idx == 0:
-            last_valid = (state.real_pos.to(device=logits_device) - 1).clamp(min=0, max=logits.shape[1] - 1)
+            last_valid = real_pos.to(device=logits_device) - 1
             next_logits = logits[torch.arange(batch_size, device=logits_device), last_valid]
         else:
             next_logits = logits[:, -1, :]
@@ -219,7 +211,7 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
         token_id, log_prob = self.sample(next_logits)
 
         grown = torch.cat([state.input_ids, torch.zeros_like(state.input_ids[:, :1])], dim=1)
-        slot = (state.real_pos + state.step_idx).unsqueeze(-1)
+        slot = (real_pos + state.step_idx).unsqueeze(-1)
         state.input_ids = grown.scatter(1, slot, token_id.unsqueeze(-1))
         updated = transformer._update_model_kwargs_for_generation(out, model_kwargs)
         new_kwargs: Dict[str, Any] = dict(updated)
@@ -263,11 +255,17 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
                 "conditions.fused.input_ids — produced by "
                 "HunyuanImage3TextEmbedStage.embed_for_ar(...)."
             )
-        if fused.attention_mask is None or fused.position_ids is None or fused.rope_cache is None:
+        if (
+            fused.attention_mask is None
+            or fused.position_ids is None
+            or fused.rope_cache is None
+            or fused.prompt_lengths is None
+            or conditions.tokenizer_output is None
+        ):
             raise ValueError(
                 "HunyuanImage3ARStage.autoregress: input_ids path requires "
-                "fused.attention_mask / position_ids / rope_cache to be set "
-                "by HunyuanImage3TextEmbedStage.embed_for_ar(...)."
+                "fused.attention_mask / position_ids / rope_cache / prompt_lengths and "
+                "conditions.tokenizer_output to be set by HunyuanImage3TextEmbedStage.embed_for_ar(...)."
             )
 
         device = fused.input_ids.device

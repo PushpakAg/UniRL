@@ -39,16 +39,15 @@ train-side AR loop owns the KV cache, the attention mask, and the `input_ids` bu
 - **`real_pos` is required at every batch size.** After prefill, upstream
   `_update_model_kwargs_for_generation` sets the decode `position_ids` from
   `tokenizer_output.real_pos`; without `tokenizer_output` it takes its decode branch at prefill
-  and every later step silently re-feeds the shifted prompt. `init_state` therefore requires
-  `tokenizer_output` and reads the same values from `fused.prompt_lengths`, which `embed_for_ar`
-  normalizes to `[B]`.
+  and every later step silently re-feeds the shifted prompt. `autoregress` therefore requires
+  `tokenizer_output`, and the step reads the same values from `fused.prompt_lengths`, which
+  `embed_for_ar` normalizes to `[B]`.
 - **`position_ids` are the KV-cache write indices, so padding them with a constant corrupts
   slot 0.** Upstream passes `position_ids` straight through as `cache_position`
   (`HunyuanImage3SDPAAttention.forward`), and `update` applies it with `index_copy_`. When
   `FusedMultimodalCondition.concat` padded the ragged `L` axis with `0`, every pad position of
   every short row wrote its KV onto cache slot 0 — last write wins, so each padded row's first
-  real token was silently replaced (measured: slot 0 off by ~4.0, every other slot
-  bit-identical). `_pad_positions` pads with each row's own continuing indices instead, which
+  real token was silently replaced. `_pad_positions` pads with each row's own continuing indices instead, which
   keeps the pad writes on distinct slots that the decode mask then excludes.
 - All of these are properties of the upstream remote code, so re-check them when the
   checkpoint revision moves. If upstream ever trims dynamic KV per row, `B > 1` can drop back

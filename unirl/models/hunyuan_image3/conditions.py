@@ -80,7 +80,7 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
 
     @classmethod
     def concat(cls, items: list) -> "HunyuanImage3FusedMultimodalCondition":
-        """Override ``Batch.concat`` to pad variable-length L dims before cat."""
+        """Override ``Batch.concat`` to pad ragged L dims before cat — position_ids: README ``## Gotchas``."""
         if not items or len(items) <= 1:
             from unirl.distributed.tensor.batch import Batch
 
@@ -119,15 +119,11 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
             return torch.nn.functional.pad(t, pad_spec, value=value)
 
         def _pad_positions(t):
-            # position_ids are the KV-cache write indices; a constant pad would collide on slot 0.
             t = _materialize(t)
-            if t is None:
-                return None
-            cur = t.shape[-1]
-            if cur >= max_L:
+            if t is None or t.shape[-1] >= max_L:
                 return t
-            tail = torch.arange(cur, max_L, dtype=t.dtype, device=t.device)
-            return torch.cat([t, tail.expand(*t.shape[:-1], max_L - cur)], dim=-1)
+            tail = torch.arange(t.shape[-1], max_L, dtype=t.dtype, device=t.device)
+            return torch.cat([t, tail.expand(*t.shape[:-1], -1)], dim=-1)
 
         def _pad_attn(mask):
             mask = _materialize(mask)
