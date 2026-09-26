@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from typing import Any, Dict, List, Optional, Tuple
@@ -108,10 +109,12 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
             )
 
         prompt_len = int(input_ids.shape[1])
-        past_kv_initial = self._build_kv_cache(
-            transformer,
+        cache_cls = sys.modules[type(transformer).__module__].HunyuanStaticCache
+        past_kv_initial = cache_cls(
+            config=transformer.config,
             batch_size=batch_size,
             max_cache_len=prompt_len + int(max_new_tokens),
+            dtype=torch.bfloat16,
             dynamic=batch_size == 1,
         )
 
@@ -286,29 +289,6 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
             return grown
         slot = (real_pos.to(device=grown.device) + step_idx).unsqueeze(-1)
         return grown.scatter(1, slot, token_id.unsqueeze(-1))
-
-    @staticmethod
-    def _build_kv_cache(transformer, *, batch_size: int, max_cache_len: int, dynamic: bool):
-        """Pre-build a ``HunyuanStaticCache`` for the AR loop — see README ``## Gotchas`` for ``dynamic``."""
-        import sys as _sys
-
-        upstream_mod = _sys.modules.get(type(transformer).__module__)
-        cache_cls = getattr(upstream_mod, "HunyuanStaticCache", None)
-        if cache_cls is None:
-            return None
-        config = getattr(transformer, "config", None)
-        if config is None:
-            return None
-        try:
-            return cache_cls(
-                config=config,
-                batch_size=batch_size,
-                max_cache_len=max_cache_len,
-                dtype=torch.bfloat16,
-                dynamic=dynamic,
-            )
-        except Exception:  # noqa: BLE001 -- fall back to HF default cache
-            return None
 
 
 class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
