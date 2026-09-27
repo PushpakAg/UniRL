@@ -17,6 +17,23 @@ from unirl.types.conditions import (
 )
 
 
+def _pad_seq(t: Any, length: int, dim: int = -1) -> Optional[torch.Tensor]:
+    """Zero-pad negative ``dim`` up to ``length``, hydrating a ``TensorRef``; longer tensors pass through."""
+    t = hydrate(t)
+    if t is None or t.shape[dim] >= length:
+        return t
+    return torch.nn.functional.pad(t, (0, 0) * (-dim - 1) + (0, length - t.shape[dim]))
+
+
+def _pad_positions(t: Any, length: int) -> Optional[torch.Tensor]:
+    """Pad ``position_ids`` with continuing indices, since they are KV-cache write slots — README ``## Gotchas``."""
+    t = hydrate(t)
+    if t is None or t.shape[-1] >= length:
+        return t
+    tail = torch.arange(t.shape[-1], length, dtype=t.dtype, device=t.device)
+    return torch.cat([t, tail.expand(*t.shape[:-1], -1)], dim=-1)
+
+
 @dataclass
 class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
     """Hunyuan's fused-sequence layout."""
@@ -81,36 +98,22 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
 
     @classmethod
     def concat(cls, items: list) -> "HunyuanImage3FusedMultimodalCondition":
-        """Override ``Batch.concat`` to pad ragged L dims before cat — position_ids: README ``## Gotchas``."""
+        """Override ``Batch.concat`` to pad ragged L dims before cat."""
         seq_lens = {item.input_ids.shape[-1] for item in items}
         if len(seq_lens) <= 1:
             return super().concat(items)
 
         max_L = max(seq_lens)
-
-        def _pad_seq(t, dim=-1):  # dim must be negative: the F.pad spec counts from the last dim
-            t = hydrate(t)
-            if t is None or t.shape[dim] >= max_L:
-                return t
-            return torch.nn.functional.pad(t, (0, 0) * (-dim - 1) + (0, max_L - t.shape[dim]))
-
-        def _pad_positions(t):
-            t = hydrate(t)
-            if t is None or t.shape[-1] >= max_L:
-                return t
-            tail = torch.arange(t.shape[-1], max_L, dtype=t.dtype, device=t.device)
-            return torch.cat([t, tail.expand(*t.shape[:-1], -1)], dim=-1)
-
         padded_items = [
             replace(
                 item,
-                input_ids=_pad_seq(item.input_ids),
-                attention_mask=_pad_seq(_pad_seq(item.attention_mask), dim=-2),
-                position_ids=_pad_positions(item.position_ids),
-                rope_cache=_pad_seq(item.rope_cache, dim=-2),
-                gen_image_mask=_pad_seq(item.gen_image_mask),
-                cond_vae_image_mask=_pad_seq(item.cond_vae_image_mask),
-                cond_vit_image_mask=_pad_seq(item.cond_vit_image_mask),
+                input_ids=_pad_seq(item.input_ids, max_L),
+                attention_mask=_pad_seq(_pad_seq(item.attention_mask, max_L), max_L, dim=-2),
+                position_ids=_pad_positions(item.position_ids, max_L),
+                rope_cache=_pad_seq(item.rope_cache, max_L, dim=-2),
+                gen_image_mask=_pad_seq(item.gen_image_mask, max_L),
+                cond_vae_image_mask=_pad_seq(item.cond_vae_image_mask, max_L),
+                cond_vit_image_mask=_pad_seq(item.cond_vit_image_mask, max_L),
             )
             for item in items
         ]
