@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Dict, Optional
 import torch
 
 from unirl.distributed.tensor.batch import Batch, FieldKind, concat_field, field
+from unirl.distributed.tensor.ref import hydrate
 from unirl.types.conditions import (
     Condition,
     FusedMultimodalCondition,
@@ -87,20 +88,14 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
 
         max_L = max(seq_lens)
 
-        def _materialize(t):
-            # Materialize lazy CONCAT fields so padded shards never mix tensors and TensorRefs.
-            if t is not None and not isinstance(t, torch.Tensor) and hasattr(t, "materialize"):
-                return t.materialize()
-            return t
-
-        def _pad_seq(t, dim=-1, value=0):  # dim must be negative: the F.pad spec counts from the last dim
-            t = _materialize(t)
+        def _pad_seq(t, dim=-1):  # dim must be negative: the F.pad spec counts from the last dim
+            t = hydrate(t)
             if t is None or t.shape[dim] >= max_L:
                 return t
-            return torch.nn.functional.pad(t, (0, 0) * (-dim - 1) + (0, max_L - t.shape[dim]), value=value)
+            return torch.nn.functional.pad(t, (0, 0) * (-dim - 1) + (0, max_L - t.shape[dim]))
 
         def _pad_positions(t):
-            t = _materialize(t)
+            t = hydrate(t)
             if t is None or t.shape[-1] >= max_L:
                 return t
             tail = torch.arange(t.shape[-1], max_L, dtype=t.dtype, device=t.device)
@@ -109,13 +104,13 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
         padded_items = [
             replace(
                 item,
-                input_ids=_pad_seq(item.input_ids, value=0),
-                attention_mask=_pad_seq(_pad_seq(item.attention_mask, value=False), dim=-2, value=False),
+                input_ids=_pad_seq(item.input_ids),
+                attention_mask=_pad_seq(_pad_seq(item.attention_mask), dim=-2),
                 position_ids=_pad_positions(item.position_ids),
-                rope_cache=_pad_seq(item.rope_cache, dim=-2, value=0.0),
-                gen_image_mask=_pad_seq(item.gen_image_mask, value=False),
-                cond_vae_image_mask=_pad_seq(item.cond_vae_image_mask, value=False),
-                cond_vit_image_mask=_pad_seq(item.cond_vit_image_mask, value=False),
+                rope_cache=_pad_seq(item.rope_cache, dim=-2),
+                gen_image_mask=_pad_seq(item.gen_image_mask),
+                cond_vae_image_mask=_pad_seq(item.cond_vae_image_mask),
+                cond_vit_image_mask=_pad_seq(item.cond_vit_image_mask),
             )
             for item in items
         ]
