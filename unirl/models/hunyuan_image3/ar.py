@@ -175,7 +175,7 @@ class HunyuanImage3ARStep(ARStep[HunyuanImage3Bundle, HunyuanImage3ARConditions,
         if not past_key_values.dynamic:
             key_len = past_key_values.max_cache_len
             if state.step_idx == 0:
-                attention_mask = F.pad(attention_mask, (0, key_len - attention_mask.shape[-1]), value=False)
+                attention_mask = F.pad(attention_mask, (0, key_len - attention_mask.shape[-1]))
             else:
                 keys = torch.arange(key_len, device=device)
                 attention_mask = (keys < real_pos[:, None] + state.step_idx)[:, None, None, :]
